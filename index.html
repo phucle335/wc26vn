@@ -2892,7 +2892,12 @@
     };
 
     let liveData = null;
-    let liveRefreshTimer = 0;
+    let liveFetchInFlight = false;
+    let lastLiveFetchAt = 0;
+    let lastUiTickAt = 0;
+    let lastFrameAt = 0;
+    let liveLoopStarted = false;
+    let liveBackupTimer = 0;
     let lastLiveScoresKey = "";
     let standingsOverlay = "standings";
     let selectedGroupName = "";
@@ -3557,10 +3562,109 @@
       return mergeRawSchedule().some((match) => match.inProgress || match.statusState === "in");
     }
 
+    function detectWallpaperRuntime() {
+      const ua = String(navigator.userAgent || "");
+      const href = String(window.location.href || "").toLowerCase();
+      const isLively = (
+        ua.includes("Lively")
+        || href.includes("lively")
+        || typeof window.lively !== "undefined"
+      );
+      const isWallpaperEngine = ua.includes("WallpaperEngine")
+        || (window.location.protocol === "file:" && !isLively);
+      const isEmbeddedWallpaper = isWallpaperEngine || isLively || window.location.protocol === "file:";
+
+      return { isWallpaperEngine, isLively, isEmbeddedWallpaper };
+    }
+
+    function forceLiveRefresh() {
+      lastLiveFetchAt = 0;
+      loadLiveData();
+    }
+
+    function getLiveRefreshIntervalMs() {
+      return hasLiveMatch() ? 5000 : 20000;
+    }
+
+    function startLiveRefreshLoop() {
+      if (liveLoopStarted) {
+        return;
+      }
+
+      liveLoopStarted = true;
+
+      function frame(now) {
+        lastFrameAt = now;
+
+        if (!lastUiTickAt || now - lastUiTickAt >= 1000) {
+          lastUiTickAt = now;
+          updateCountdown();
+        }
+
+        const fetchEvery = getLiveRefreshIntervalMs();
+        if (!liveFetchInFlight && now - lastLiveFetchAt >= fetchEvery) {
+          loadLiveData();
+        }
+
+        requestAnimationFrame(frame);
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    function startLiveBackupTimer() {
+      if (liveBackupTimer) {
+        return;
+      }
+
+      liveBackupTimer = window.setInterval(() => {
+        const fetchEvery = getLiveRefreshIntervalMs();
+        const frameStalled = Date.now() - lastFrameAt > 15000;
+        const fetchDue = Date.now() - lastLiveFetchAt >= fetchEvery - 750;
+
+        if (!liveFetchInFlight && (fetchDue || frameStalled)) {
+          loadLiveData();
+        }
+      }, 5000);
+    }
+
+    function initWallpaperRuntime() {
+      const runtime = detectWallpaperRuntime();
+      const runtimeTag = runtime.isWallpaperEngine
+        ? "wallpaper-engine"
+        : runtime.isLively
+          ? "lively"
+          : runtime.isEmbeddedWallpaper
+            ? "embed"
+            : "web";
+
+      document.documentElement.dataset.wallpaperRuntime = runtimeTag;
+
+      startLiveRefreshLoop();
+
+      if (runtime.isEmbeddedWallpaper) {
+        startLiveBackupTimer();
+      }
+
+      const previousWallpaperListener = window.wallpaperPropertyListener;
+      window.wallpaperPropertyListener = {
+        applyUserProperties(properties) {
+          if (previousWallpaperListener && typeof previousWallpaperListener.applyUserProperties === "function") {
+            previousWallpaperListener.applyUserProperties(properties);
+          }
+
+          forceLiveRefresh();
+        }
+      };
+
+      window.addEventListener("focus", forceLiveRefresh);
+      window.addEventListener("pageshow", forceLiveRefresh);
+      window.addEventListener("online", forceLiveRefresh);
+      document.addEventListener("visibilitychange", forceLiveRefresh);
+    }
+
     function scheduleLiveRefresh() {
-      window.clearInterval(liveRefreshTimer);
-      const interval = hasLiveMatch() ? 5000 : 20000;
-      liveRefreshTimer = window.setInterval(loadLiveData, interval);
+      startLiveRefreshLoop();
     }
 
     function getGroupMatches(groupName) {
@@ -5697,7 +5801,7 @@
       const end = new Date(now);
       end.setDate(end.getDate() + 7);
       const fmt = (date) => date.toISOString().slice(0, 10).replace(/-/g, "");
-      return `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=${fmt(start)}-${fmt(end)}&limit=200`;
+      return `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=${fmt(start)}-${fmt(end)}&limit=200&_=${Date.now()}`;
     }
 
     const espnAbbreviationAliases = {
@@ -5786,8 +5890,21 @@
     }
 
     async function loadLiveData(retry = true) {
+      if (liveFetchInFlight) {
+        return;
+      }
+
+      liveFetchInFlight = true;
+      lastLiveFetchAt = Date.now();
+
       try {
-        const response = await fetch(buildEspnScoreboardUrl(), { cache: "no-store" });
+        const response = await fetch(buildEspnScoreboardUrl(), {
+          cache: "no-store",
+          headers: {
+            "Cache-Control": "no-cache",
+            Pragma: "no-cache"
+          }
+        });
 
         if (!response.ok) {
           throw new Error(`ESPN returned ${response.status}`);
@@ -5801,15 +5918,16 @@
 
         lastLiveScoresKey = getLiveScoresKey();
         refreshLiveViews();
-        scheduleLiveRefresh();
       } catch (error) {
         if (retry) {
+          liveFetchInFlight = false;
           window.setTimeout(() => loadLiveData(false), 2000);
           return;
         }
 
         loadBundledLiveData();
-        scheduleLiveRefresh();
+      } finally {
+        liveFetchInFlight = false;
       }
     }
 
@@ -6031,14 +6149,9 @@
 
     renderStandings();
     startTaskbarInsetWatcher();
+    initWallpaperRuntime();
     renderLocalClock();
     loadLiveData();
-
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        loadLiveData();
-      }
-    });
     groupControlsEl.addEventListener("click", (event) => {
       const button = event.target.closest(".group-button");
       if (!button) {
@@ -6127,8 +6240,6 @@
       centerMatchKey = card.dataset.matchKey;
       updateCountdown();
     });
-
-    setInterval(updateCountdown, 1000);
 
     const canvas = document.getElementById("motion");
     const context = canvas.getContext("2d");
