@@ -4287,59 +4287,259 @@
       return parts.length ? parts : [4, 4, 2];
     }
 
+    function isDefenderAbbr(abbr) {
+      return (
+        abbr === "RB" || abbr === "LB" || abbr === "RWB" || abbr === "LWB"
+        || abbr === "CB" || abbr === "RCB" || abbr === "LCB"
+        || abbr.startsWith("CD")
+      );
+    }
+
     function lineupRoleDepth(player, formation) {
       const abbr = String(player.positionAbbr || "").toUpperCase().trim();
       const lines = parseFormationLines(formation);
-      const pivotSize = lines.length >= 2 ? lines[1] : 4;
-      const isDoublePivot = pivotSize === 2 && lines.length >= 4;
+      const lineCount = lines.length;
+      const lastCount = lines[lineCount - 1] || 1;
+      const secondLastCount = lineCount >= 2 ? lines[lineCount - 2] : 0;
+      const pivotSize = lineCount >= 2 ? lines[1] : 4;
+      const isDoublePivot = pivotSize === 2 && lineCount >= 4;
 
       if (abbr === "G" || abbr === "GK") {
         return 0;
       }
 
-      if (
-        abbr === "RB" || abbr === "LB" || abbr === "RWB" || abbr === "LWB"
-        || abbr === "CB" || abbr === "RCB" || abbr === "LCB"
-        || abbr.startsWith("CD")
-      ) {
+      if (isDefenderAbbr(abbr)) {
         return 10;
       }
 
-      if (abbr === "DM" || abbr === "CDM" || ((abbr === "LM" || abbr === "RM") && isDoublePivot)) {
-        return 20;
+      if (lastCount === 1 && (abbr === "F" || abbr.startsWith("ST"))) {
+        return 90;
       }
 
-      if (abbr.startsWith("CM")) {
-        return 25;
+      if (
+        lastCount === 1
+        && secondLastCount === 2
+        && (abbr.startsWith("CF") || abbr.startsWith("AM") || abbr === "CAM")
+      ) {
+        return 70;
       }
 
-      if (abbr === "AM" || abbr === "CAM") {
-        return 28;
+      if (
+        lastCount === 2
+        && (abbr === "F" || abbr.startsWith("ST") || abbr.startsWith("CF"))
+      ) {
+        return 90;
       }
 
-      if (abbr === "LW" || abbr === "RW" || abbr.startsWith("AM")) {
+      if (
+        lastCount === 3
+        && (abbr === "F" || abbr.startsWith("ST") || abbr === "LW" || abbr === "RW")
+      ) {
+        return 85;
+      }
+
+      if (
+        lastCount === 3
+        && (abbr.startsWith("AM") || abbr === "CAM")
+      ) {
+        return 80;
+      }
+
+      if (
+        lastCount === 1
+        && lineCount >= 4
+        && secondLastCount === 3
+        && (abbr.startsWith("AM") || abbr === "LW" || abbr === "RW" || abbr === "CAM")
+      ) {
+        return 65;
+      }
+
+      if (isDoublePivot && (abbr === "DM" || abbr === "CDM" || abbr === "LM" || abbr === "RM")) {
         return 30;
       }
 
-      if (abbr === "LM" || abbr === "RM") {
+      if (pivotSize === 1 && lineCount >= 4 && (abbr === "DM" || abbr === "CDM")) {
         return 28;
       }
 
-      if (abbr === "F" || abbr.startsWith("ST") || abbr.startsWith("CF")) {
+      if (abbr.startsWith("AM") || abbr === "LW" || abbr === "RW" || abbr === "CAM") {
+        return 55;
+      }
+
+      if (abbr.startsWith("CM")) {
         return 40;
       }
 
-      return 15 + (Number(player.formationPlace) || 99) * 0.01;
-    }
-
-    function spreadLineupX(count, index) {
-      if (count <= 1) {
-        return 50;
+      if (abbr === "LM" || abbr === "RM") {
+        return 45;
       }
 
-      const min = 12;
-      const max = 88;
-      return min + (index / (count - 1)) * (max - min);
+      if (abbr.startsWith("CF")) {
+        return 75;
+      }
+
+      return 35 + (Number(player.formationPlace) || 99) * 0.01;
+    }
+
+    function buildFormationRowXTemplate(formation) {
+      const lines = parseFormationLines(formation);
+      const template = [null];
+
+      lines.forEach((count, rowIndex) => {
+        const isFirst = rowIndex === 0;
+        const isLast = rowIndex === lines.length - 1;
+        const isSecondLast = rowIndex === lines.length - 2;
+
+        if (count === 1) {
+          template.push([50]);
+          return;
+        }
+
+        if (count === 2) {
+          if (isLast || (isSecondLast && lines[lines.length - 1] === 1)) {
+            template.push([40, 60]);
+            return;
+          }
+
+          template.push([34, 66]);
+          return;
+        }
+
+        if (count === 3) {
+          if (isFirst && lines[0] === 3) {
+            template.push([28, 50, 72]);
+            return;
+          }
+
+          if (isLast) {
+            template.push([24, 50, 76]);
+            return;
+          }
+
+          if (isSecondLast && lines[lines.length - 1] === 1) {
+            template.push([32, 50, 68]);
+            return;
+          }
+
+          template.push([30, 50, 70]);
+          return;
+        }
+
+        if (count === 4) {
+          if (isFirst) {
+            template.push([14, 38, 62, 86]);
+            return;
+          }
+
+          if (lines[0] === 3) {
+            template.push([12, 34, 66, 88]);
+            return;
+          }
+
+          template.push([18, 42, 58, 82]);
+          return;
+        }
+
+        if (count === 5) {
+          template.push([10, 26, 50, 74, 90]);
+          return;
+        }
+
+        template.push(Array.from({ length: count }, (_, index) => {
+          return 10 + (index / (count - 1)) * 80;
+        }));
+      });
+
+      return template;
+    }
+
+    function lineupRowXPositions(formation, rowIndex, playerCount) {
+      const template = buildFormationRowXTemplate(formation);
+      const slots = template[rowIndex];
+
+      if (Array.isArray(slots) && slots.length === playerCount) {
+        return slots;
+      }
+
+      if (playerCount <= 1) {
+        return [50];
+      }
+
+      if (playerCount === 2) {
+        const isForwardRow = rowIndex === template.length - 1;
+        return isForwardRow ? [40, 60] : [34, 66];
+      }
+
+      if (playerCount === 3) {
+        if (rowIndex === 1) {
+          return [28, 50, 72];
+        }
+
+        return [32, 50, 68];
+      }
+
+      const offset = rowIndex % 2 === 0 ? 0 : 4;
+      return Array.from({ length: playerCount }, (_, index) => {
+        if (playerCount === 4) {
+          return [14 + offset, 38 + offset, 62 - offset, 86 - offset][index];
+        }
+
+        return 10 + (index / (playerCount - 1)) * 80;
+      });
+    }
+
+    function assignLineupRowX(rowPlayers, formation, rowIndex) {
+      const slots = lineupRowXPositions(formation, rowIndex, rowPlayers.length);
+      const sorted = sortLineupRowPlayers(rowPlayers);
+
+      sorted.forEach((player, index) => {
+        player.__layoutX = slots[index] ?? slots[slots.length - 1] ?? 50;
+      });
+
+      return sorted;
+    }
+
+    function staggerLineupColumns(coords, starters) {
+      const entries = starters
+        .map((player) => {
+          const point = coords.get(player.id);
+          if (!point) {
+            return null;
+          }
+
+          return { id: player.id, x: point.x, y: point.y };
+        })
+        .filter(Boolean);
+      const used = new Set();
+
+      entries.forEach((seed) => {
+        if (used.has(seed.id)) {
+          return;
+        }
+
+        const column = entries
+          .filter((entry) => Math.abs(entry.x - seed.x) <= 7)
+          .sort((left, right) => left.y - right.y);
+
+        if (column.length < 2) {
+          return;
+        }
+
+        column.forEach((entry) => used.add(entry.id));
+
+        const shifts = column.length > 3
+          ? [-12, -6, 0, 6, 12]
+          : [-9, 0, 9];
+
+        column.forEach((entry, index) => {
+          const shift = shifts[index] ?? 0;
+          entry.x = Math.max(10, Math.min(90, entry.x + shift));
+        });
+      });
+
+      entries.forEach((entry) => {
+        coords.set(entry.id, { x: entry.x, y: entry.y });
+      });
     }
 
     const LINEUP_HALF_ZONE = {
@@ -4491,29 +4691,35 @@
         let cursor = 0;
 
         for (let rowIndex = 1; rowIndex < rowCounts.length; rowIndex += 1) {
-          const rowPlayers = sortLineupRowPlayers(
-            outfield.slice(cursor, cursor + rowCounts[rowIndex])
+          const rowPlayers = assignLineupRowX(
+            outfield.slice(cursor, cursor + rowCounts[rowIndex]),
+            formation,
+            rowIndex
           );
 
           cursor += rowCounts[rowIndex];
-          rowPlayers.forEach((player, index) => {
+          rowPlayers.forEach((player) => {
             coords.set(player.id, {
-              x: spreadLineupX(rowPlayers.length, index),
+              x: player.__layoutX ?? 50,
               y: yByRow[rowIndex]
             });
+            delete player.__layoutX;
           });
         }
       } else {
         for (let rowIndex = 1; rowIndex < rowCounts.length; rowIndex += 1) {
-          const rowPlayers = sortLineupRowPlayers(
-            resolveLineupRowPlayers(outfield, lines.length, rowIndex - 1)
+          const rowPlayers = assignLineupRowX(
+            resolveLineupRowPlayers(outfield, lines.length, rowIndex - 1),
+            formation,
+            rowIndex
           );
 
-          rowPlayers.forEach((player, index) => {
+          rowPlayers.forEach((player) => {
             coords.set(player.id, {
-              x: spreadLineupX(rowPlayers.length, index),
+              x: player.__layoutX ?? 50,
               y: yByRow[rowIndex]
             });
+            delete player.__layoutX;
           });
         }
 
@@ -4531,6 +4737,7 @@
       });
 
       nudgeLineupCollisions(coords, starters);
+      staggerLineupColumns(coords, starters);
 
       return coords;
     }
