@@ -2947,7 +2947,11 @@
         hour12: false
       }).format(new Date());
 
-      return source === "ESPN" ? `ESPN · ${time} · trễ 2p30` : "CỤC BỘ";
+      return source === "ESPN"
+        ? `ESPN · ${time} · trễ 2p30`
+        : source === "ESPN-offline"
+          ? `ESPN · ngoại tuyến · ${time}`
+          : "CỤC BỘ";
     }
 
     function formatVnDateTime(date) {
@@ -3028,9 +3032,9 @@
       const key = matchKey(match.home, match.away, match.utc);
       const rawHome = match.homeScore;
       const rawAway = match.awayScore;
-      const hasScore = rawHome !== null && rawAway !== null;
       const rawInProgress = match.inProgress;
       const rawCompleted = match.completed;
+      const hasScore = rawHome !== null && rawAway !== null && (rawInProgress || rawCompleted);
 
       const withRaw = (patch) => ({
         ...match,
@@ -3274,9 +3278,34 @@
       return `${teams}|${day}`;
     }
 
+    function liveEventPairKey(home, away) {
+      return [canonicalName(home), canonicalName(away)].sort().join("|");
+    }
+
+    function preferLiveEvent(candidate, existing) {
+      if (!existing) {
+        return true;
+      }
+
+      const candidateLive = candidate.statusState === "in";
+      const existingLive = existing.statusState === "in";
+      if (candidateLive !== existingLive) {
+        return candidateLive;
+      }
+
+      const candidateDone = candidate.statusState === "post" || candidate.completed;
+      const existingDone = existing.statusState === "post" || existing.completed;
+      if (candidateDone !== existingDone) {
+        return candidateDone;
+      }
+
+      return Date.parse(candidate.utc) >= Date.parse(existing.utc);
+    }
+
     function buildLiveLookups(liveEvents) {
       const byExact = new Map();
       const byDay = new Map();
+      const byPair = new Map();
 
       liveEvents.forEach((event) => {
         if (!event.home || !event.away || !event.utc) {
@@ -3287,20 +3316,19 @@
         byExact.set(exactKey, event);
 
         const dayKey = liveEventDayKey(event.home, event.away, event.utc);
-        const existing = byDay.get(dayKey);
-        if (!existing) {
+        const dayExisting = byDay.get(dayKey);
+        if (preferLiveEvent(event, dayExisting)) {
           byDay.set(dayKey, event);
-          return;
         }
 
-        const preferLive = event.statusState === "in" && existing.statusState !== "in";
-        const newerKickoff = Date.parse(event.utc) > Date.parse(existing.utc);
-        if (preferLive || newerKickoff) {
-          byDay.set(dayKey, event);
+        const pairKey = liveEventPairKey(event.home, event.away);
+        const pairExisting = byPair.get(pairKey);
+        if (preferLiveEvent(event, pairExisting)) {
+          byPair.set(pairKey, event);
         }
       });
 
-      return { byExact, byDay };
+      return { byExact, byDay, byPair };
     }
 
     function lookupLiveEvent(scheduleMatch, lookups) {
@@ -3311,7 +3339,27 @@
       }
 
       const dayKey = liveEventDayKey(scheduleMatch.home, scheduleMatch.away, scheduleMatch.utc);
-      return lookups.byDay.get(dayKey) || null;
+      const byDay = lookups.byDay.get(dayKey);
+      if (byDay) {
+        return byDay;
+      }
+
+      const pairKey = liveEventPairKey(scheduleMatch.home, scheduleMatch.away);
+      const byPair = lookups.byPair.get(pairKey);
+      if (!byPair) {
+        return null;
+      }
+
+      const scheduleKickoff = Date.parse(scheduleMatch.utc);
+      const pairKickoff = Date.parse(byPair.utc);
+      if (Number.isFinite(scheduleKickoff) && Number.isFinite(pairKickoff)) {
+        const hoursApart = Math.abs(scheduleKickoff - pairKickoff) / 3600000;
+        if (hoursApart > 30) {
+          return null;
+        }
+      }
+
+      return byPair;
     }
 
     function mergeRawSchedule() {
@@ -3453,7 +3501,21 @@
     }
 
     function isLiveMatch(match) {
-      return !!(match?.inProgress || match?.rawInProgress);
+      return !!(
+        match?.inProgress
+        || match?.rawInProgress
+        || match?.statusState === "in"
+      );
+    }
+
+    function findLiveMatch() {
+      const rawLive = mergeRawSchedule().find((match) => isLiveMatch(match));
+      if (!rawLive) {
+        return null;
+      }
+
+      const key = matchKey(rawLive.home, rawLive.away, rawLive.utc);
+      return mergeLiveSchedule().find((match) => matchKey(match.home, match.away, match.utc) === key) || rawLive;
     }
 
     function setStageMode(isLive) {
@@ -3513,8 +3575,8 @@
     function getLiveTeamsInStandings() {
       const liveTeams = new Set();
 
-      mergeLiveSchedule().forEach((match) => {
-        if (match.inProgress || match.rawInProgress) {
+      mergeRawSchedule().forEach((match) => {
+        if (isLiveMatch(match)) {
           liveTeams.add(match.home);
           liveTeams.add(match.away);
         }
@@ -3559,7 +3621,9 @@
     }
 
     function hasLiveMatch() {
-      return mergeRawSchedule().some((match) => match.inProgress || match.statusState === "in");
+      return mergeRawSchedule().some((match) => (
+        match.inProgress || match.statusState === "in"
+      ));
     }
 
     function detectWallpaperRuntime() {
@@ -5681,11 +5745,20 @@
     }
 
     function getStandingsScores(match) {
-      if (match.homeScore !== null && match.awayScore !== null) {
-        return { home: match.homeScore, away: match.awayScore };
+      const liveOrDone = match.statusState === "in"
+        || match.statusState === "post"
+        || match.inProgress
+        || match.completed;
+
+      if (!liveOrDone) {
+        return null;
       }
 
-      return null;
+      if (match.homeScore === null || match.awayScore === null) {
+        return null;
+      }
+
+      return { home: match.homeScore, away: match.awayScore };
     }
 
     function buildStandings() {
@@ -5708,7 +5781,7 @@
         });
       });
 
-      mergeLiveSchedule().forEach((match) => {
+      mergeRawSchedule().forEach((match) => {
         const scores = getStandingsScores(match);
         if (!scores) {
           return;
@@ -5723,9 +5796,8 @@
         const away = groupTable[match.away];
         const homeScore = scores.home;
         const awayScore = scores.away;
-        const isLive = match.isProvisional || match.rawInProgress;
-        const isFinal = (match.completed || match.rawCompleted) && !match.rawInProgress
-          && match.homeScore !== null && match.awayScore !== null;
+        const isLive = isLiveMatch(match);
+        const isFinal = !isLive && (match.statusState === "post" || match.completed);
 
         if (isFinal) {
           home.played += 1;
@@ -5790,7 +5862,7 @@
       return value > 0 ? `+${value}` : String(value);
     }
 
-    function buildEspnScoreboardUrl() {
+    function buildEspnScoreboardDatesParam() {
       const now = new Date();
       const tournamentStartMs = schedule.reduce(
         (earliest, match) => Math.min(earliest, Date.parse(match.utc)),
@@ -5801,7 +5873,43 @@
       const end = new Date(now);
       end.setDate(end.getDate() + 7);
       const fmt = (date) => date.toISOString().slice(0, 10).replace(/-/g, "");
-      return `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=${fmt(start)}-${fmt(end)}&limit=200&_=${Date.now()}`;
+      return `${fmt(start)}-${fmt(end)}`;
+    }
+
+    function buildEspnScoreboardUrl() {
+      return `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=${buildEspnScoreboardDatesParam()}&limit=200&_=${Date.now()}`;
+    }
+
+    function buildEspnProxyUrl() {
+      return `/api/espn-scoreboard?dates=${buildEspnScoreboardDatesParam()}&limit=200&_=${Date.now()}`;
+    }
+
+    async function fetchEspnScoreboardPayload() {
+      const requestInit = {
+        cache: "no-store",
+        headers: {
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache"
+        }
+      };
+      const attempts = [buildEspnScoreboardUrl(), buildEspnProxyUrl()];
+      let lastError = null;
+
+      for (const url of attempts) {
+        try {
+          const response = await fetch(url, requestInit);
+          if (!response.ok) {
+            lastError = new Error(`ESPN returned ${response.status}`);
+            continue;
+          }
+
+          return await response.json();
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      throw lastError || new Error("ESPN unavailable");
     }
 
     const espnAbbreviationAliases = {
@@ -5872,11 +5980,14 @@
       script.src = `worldcup-live-data.js?ts=${Date.now()}`;
       script.onload = () => {
         if (window.WORLDCUP_LIVE_DATA && Array.isArray(window.WORLDCUP_LIVE_DATA.events)) {
-          liveData = window.WORLDCUP_LIVE_DATA;
-          if (dataStatusEl) {
-            dataStatusEl.textContent = formatDataStatus("local");
+          if (!liveData || !Array.isArray(liveData.events) || liveData.events.length === 0) {
+            liveData = window.WORLDCUP_LIVE_DATA;
+            if (dataStatusEl) {
+              dataStatusEl.textContent = formatDataStatus("local");
+            }
+            refreshLiveViews();
           }
-          refreshLiveViews();
+
           scheduleLiveRefresh();
         }
       };
@@ -5898,19 +6009,7 @@
       lastLiveFetchAt = Date.now();
 
       try {
-        const response = await fetch(buildEspnScoreboardUrl(), {
-          cache: "no-store",
-          headers: {
-            "Cache-Control": "no-cache",
-            Pragma: "no-cache"
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`ESPN returned ${response.status}`);
-        }
-
-        liveData = transformEspnScoreboard(await response.json());
+        liveData = transformEspnScoreboard(await fetchEspnScoreboardPayload());
 
         if (dataStatusEl) {
           dataStatusEl.textContent = formatDataStatus("ESPN");
@@ -5925,7 +6024,11 @@
           return;
         }
 
-        loadBundledLiveData();
+        if (!liveData || !Array.isArray(liveData.events) || liveData.events.length === 0) {
+          loadBundledLiveData();
+        } else if (dataStatusEl) {
+          dataStatusEl.textContent = formatDataStatus("ESPN-offline");
+        }
       } finally {
         liveFetchInFlight = false;
       }
@@ -6007,11 +6110,19 @@
     }
 
     function isUpcomingOrLiveMatch(match, now) {
-      return !match.completed && (match.inProgress || match.rawInProgress || Date.parse(match.utc) > now);
+      if (isLiveMatch(match)) {
+        return true;
+      }
+
+      if (match.rawCompleted ?? match.completed) {
+        return false;
+      }
+
+      return Date.parse(match.utc) > now;
     }
 
     function matchPriority(match) {
-      if (match.inProgress || match.rawInProgress) {
+      if (isLiveMatch(match)) {
         return 0;
       }
 
@@ -6033,6 +6144,12 @@
     }
 
     function getCenterMatch(matches) {
+      const liveMatch = findLiveMatch();
+      if (liveMatch) {
+        centerMatchKey = matchKey(liveMatch.home, liveMatch.away, liveMatch.utc);
+        return liveMatch;
+      }
+
       if (centerMatchKey) {
         const selected = matches.find((match) => matchKey(match.home, match.away, match.utc) === centerMatchKey);
         if (selected) {
@@ -6042,7 +6159,7 @@
         centerMatchKey = "";
       }
 
-      return matches.find((match) => match.inProgress || match.rawInProgress) || matches[0] || null;
+      return matches[0] || null;
     }
 
     function renderFixtures(matches, activeKey) {
