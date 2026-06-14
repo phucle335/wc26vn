@@ -2040,7 +2040,7 @@
       font-weight: 800;
     }
 
-    @media (max-height: 1080px) {
+    @media (max-height: 1080px) and (min-width: 981px) {
       .standings-panel {
         height: min(50rem, calc(100vh - 5rem));
       }
@@ -2086,14 +2086,20 @@
     @media (max-width: 980px) {
       html,
       body {
+        height: auto;
+        min-height: 100%;
         overflow-x: hidden;
         overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
       }
 
       .wallpaper {
-        min-height: 1180px;
+        height: auto;
+        min-height: 100vh;
+        min-height: 100dvh;
         max-width: 100vw;
         overflow-x: hidden;
+        overflow-y: visible;
       }
 
       .halo,
@@ -2151,20 +2157,25 @@
 
       .standings-panel,
       .fixtures-panel {
-        min-height: auto;
+        min-height: 0;
         height: auto;
+        max-height: none;
+        overflow: visible;
       }
 
       .standings-panel .standings-scroll {
         margin-top: 0.9rem;
       }
 
-      .standings-scroll {
+      .standings-scroll,
+      .standings-scroll:not(:has(.standings-overlay:not(.hidden))) {
         flex: none;
         min-height: auto;
         height: auto;
         max-height: none;
         overflow: visible;
+        overflow-x: hidden;
+        overflow-y: visible;
         overscroll-behavior: auto;
         touch-action: auto;
         padding-right: 0;
