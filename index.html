@@ -7,6 +7,8 @@
   <style>
     :root {
       color-scheme: dark;
+      --taskbar-inset: 0px;
+      --taskbar-inset-right: 0px;
       --ink: #ffffff;
       --muted: rgba(240, 245, 255, 0.88);
       --dim: rgba(220, 228, 240, 0.72);
@@ -1989,14 +1991,15 @@
     }
 
     .local-clock-wrap {
-      position: absolute;
-      right: 2rem;
-      bottom: 1.2rem;
-      z-index: 3;
+      position: fixed;
+      right: calc(2rem + var(--taskbar-inset-right, 0px));
+      bottom: calc(1.2rem + var(--taskbar-inset, 0px) + env(safe-area-inset-bottom, 0px));
+      z-index: 20;
       display: grid;
       justify-items: end;
       gap: 0.18rem;
       text-align: right;
+      pointer-events: none;
     }
 
     .local-clock {
@@ -2972,6 +2975,48 @@
       }
 
       localUpdatedEl.textContent = "Deploy web: —";
+    }
+
+    function readTaskbarInsetOverride() {
+      const params = new URLSearchParams(window.location.search);
+      const queryValue = Number(params.get("taskbar"));
+      if (Number.isFinite(queryValue) && queryValue >= 0) {
+        return queryValue;
+      }
+
+      const storedValue = Number(window.localStorage.getItem("wc26TaskbarInset"));
+      if (Number.isFinite(storedValue) && storedValue >= 0) {
+        return storedValue;
+      }
+
+      return null;
+    }
+
+    function syncTaskbarInset() {
+      const override = readTaskbarInsetOverride();
+      const screenBottom = Math.max(0, window.screen.height - window.screen.availHeight);
+      const screenRight = Math.max(0, window.screen.width - window.screen.availWidth);
+      const viewport = window.visualViewport;
+      const viewportBottom = viewport
+        ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+        : 0;
+      const viewportRight = viewport
+        ? Math.max(0, window.innerWidth - viewport.width - viewport.offsetLeft)
+        : 0;
+      const bottomInset = override ?? Math.max(screenBottom, viewportBottom);
+      const rightInset = Math.max(screenRight, viewportRight);
+
+      document.documentElement.style.setProperty("--taskbar-inset", `${bottomInset}px`);
+      document.documentElement.style.setProperty("--taskbar-inset-right", `${rightInset}px`);
+    }
+
+    function startTaskbarInsetWatcher() {
+      syncTaskbarInset();
+      window.addEventListener("resize", syncTaskbarInset);
+      window.addEventListener("orientationchange", syncTaskbarInset);
+      window.visualViewport?.addEventListener("resize", syncTaskbarInset);
+      window.visualViewport?.addEventListener("scroll", syncTaskbarInset);
+      window.setInterval(syncTaskbarInset, 1500);
     }
 
     function applySpoilerDelay(match) {
@@ -5985,6 +6030,7 @@
     }
 
     renderStandings();
+    startTaskbarInsetWatcher();
     renderLocalClock();
     loadLiveData();
 
