@@ -1986,14 +1986,30 @@
       white-space: nowrap;
     }
 
-    .local-clock {
+    .local-clock-wrap {
       position: absolute;
       right: 2rem;
       bottom: 1.2rem;
       z-index: 3;
+      display: grid;
+      justify-items: end;
+      gap: 0.18rem;
+      text-align: right;
+    }
+
+    .local-clock {
       color: #e8f4ff;
       font-size: 0.78rem;
       line-height: 1.4;
+      font-variant-numeric: tabular-nums;
+      text-shadow: var(--read-shadow);
+    }
+
+    .local-updated {
+      color: rgba(200, 216, 236, 0.88);
+      font-size: 0.62rem;
+      line-height: 1.35;
+      font-weight: 700;
       font-variant-numeric: tabular-nums;
       text-shadow: var(--read-shadow);
     }
@@ -2358,9 +2374,13 @@
       </aside>
     </section>
 
-    <div class="local-clock" id="localClock"></div>
+    <div class="local-clock-wrap">
+      <div class="local-clock" id="localClock">Giờ VN · —</div>
+      <div class="local-updated" id="localUpdated">Deploy web: —</div>
+    </div>
   </main>
 
+  <script src="deploy-info.js"></script>
   <script>
     const teamInfo = {
       "Algeria": { code: "dz", short: "ALG" },
@@ -2733,6 +2753,7 @@
     const matchTitleEl = document.getElementById("matchTitle");
     const matchTimeEl = document.getElementById("matchTime");
     const localClockEl = document.getElementById("localClock");
+    const localUpdatedEl = document.getElementById("localUpdated");
     const dataStatusEl = document.getElementById("dataStatus");
 
     function pad(value, size) {
@@ -2919,6 +2940,38 @@
       return source === "ESPN" ? `ESPN · ${time} · trễ 2p30` : "CỤC BỘ";
     }
 
+    function formatVnDateTime(date) {
+      return new Intl.DateTimeFormat("vi-VN", {
+        timeZone: TIMEZONE_VN,
+        weekday: "short",
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      }).format(date);
+    }
+
+    function renderLocalClock() {
+      if (localClockEl) {
+        localClockEl.textContent = `Giờ VN · ${formatVnDateTime(new Date())}`;
+      }
+
+      if (!localUpdatedEl) {
+        return;
+      }
+
+      const deployAt = window.WC26_DEPLOY?.updatedAt;
+      if (deployAt) {
+        localUpdatedEl.textContent = `Deploy web: ${formatVnDateTime(new Date(deployAt))}`;
+        return;
+      }
+
+      localUpdatedEl.textContent = "Deploy web: —";
+    }
+
     function applySpoilerDelay(match) {
       const key = matchKey(match.home, match.away, match.utc);
       const rawHome = match.homeScore;
@@ -2949,14 +3002,11 @@
           targetAway: null,
           targetSince: 0,
           wasLive: false,
+          liveBootstrapped: false,
           latestSummary: null,
           shownSummary: null
         };
         scoreDelayState.set(key, state);
-      }
-
-      if (rawInProgress) {
-        state.wasLive = true;
       }
 
       // Trận đã kết thúc trước phiên hiện tại → hiện ngay (lịch sử / bảng điểm)
@@ -2977,6 +3027,21 @@
 
       const now = Date.now();
 
+      if (rawInProgress) {
+        state.wasLive = true;
+
+        // Lần đầu thấy trận live → hiện tỷ số ESPN ngay, chỉ delay khi có bàn mới sau đó
+        if (!state.liveBootstrapped) {
+          state.liveBootstrapped = true;
+          state.shownHome = rawHome;
+          state.shownAway = rawAway;
+          state.targetHome = rawHome;
+          state.targetAway = rawAway;
+          state.targetSince = now;
+          commitSummaryOnScoreReveal(state);
+        }
+      }
+
       if (state.targetHome !== rawHome || state.targetAway !== rawAway) {
         state.targetHome = rawHome;
         state.targetAway = rawAway;
@@ -2984,14 +3049,9 @@
       }
 
       const delayElapsed = now - state.targetSince >= SPOILER_DELAY_MS;
-      const hasShown = state.shownHome !== null && state.shownAway !== null;
-      const shownDiffers = hasShown && (state.shownHome !== state.targetHome || state.shownAway !== state.targetAway);
+      const shownDiffers = state.shownHome !== state.targetHome || state.shownAway !== state.targetAway;
 
-      if (!hasShown && delayElapsed) {
-        state.shownHome = state.targetHome;
-        state.shownAway = state.targetAway;
-        commitSummaryOnScoreReveal(state);
-      } else if (shownDiffers && delayElapsed) {
+      if (shownDiffers && delayElapsed) {
         state.shownHome = state.targetHome;
         state.shownAway = state.targetAway;
         commitSummaryOnScoreReveal(state);
@@ -3008,7 +3068,7 @@
         });
       }
 
-      const isProvisional = rawInProgress;
+      const isProvisional = rawInProgress && shownDiffers;
 
       return withRaw({
         homeScore: state.shownHome,
@@ -3156,20 +3216,58 @@
       renderDetailTabPanel(summary, match, detailTab);
     }
 
-    function mergeRawSchedule() {
-      const liveEvents = liveData && Array.isArray(liveData.events) ? liveData.events : [];
-      const liveIndex = new Map();
+    function liveEventDayKey(home, away, utc) {
+      const teams = [canonicalName(home), canonicalName(away)].sort().join("|");
+      const day = new Date(utc).toISOString().slice(0, 10);
+      return `${teams}|${day}`;
+    }
+
+    function buildLiveLookups(liveEvents) {
+      const byExact = new Map();
+      const byDay = new Map();
 
       liveEvents.forEach((event) => {
         if (!event.home || !event.away || !event.utc) {
           return;
         }
 
-        liveIndex.set(matchKey(event.home, event.away, event.utc), event);
+        const exactKey = matchKey(event.home, event.away, event.utc);
+        byExact.set(exactKey, event);
+
+        const dayKey = liveEventDayKey(event.home, event.away, event.utc);
+        const existing = byDay.get(dayKey);
+        if (!existing) {
+          byDay.set(dayKey, event);
+          return;
+        }
+
+        const preferLive = event.statusState === "in" && existing.statusState !== "in";
+        const newerKickoff = Date.parse(event.utc) > Date.parse(existing.utc);
+        if (preferLive || newerKickoff) {
+          byDay.set(dayKey, event);
+        }
       });
 
+      return { byExact, byDay };
+    }
+
+    function lookupLiveEvent(scheduleMatch, lookups) {
+      const exactKey = matchKey(scheduleMatch.home, scheduleMatch.away, scheduleMatch.utc);
+      const exact = lookups.byExact.get(exactKey);
+      if (exact) {
+        return exact;
+      }
+
+      const dayKey = liveEventDayKey(scheduleMatch.home, scheduleMatch.away, scheduleMatch.utc);
+      return lookups.byDay.get(dayKey) || null;
+    }
+
+    function mergeRawSchedule() {
+      const liveEvents = liveData && Array.isArray(liveData.events) ? liveData.events : [];
+      const lookups = buildLiveLookups(liveEvents);
+
       return schedule.map((match) => {
-        const event = liveIndex.get(matchKey(match.home, match.away, match.utc));
+        const event = lookupLiveEvent(match, lookups);
         if (!event) {
           return {
             ...match,
@@ -3409,12 +3507,12 @@
     }
 
     function hasLiveMatch() {
-      return mergeRawSchedule().some((match) => match.inProgress);
+      return mergeRawSchedule().some((match) => match.inProgress || match.statusState === "in");
     }
 
     function scheduleLiveRefresh() {
       window.clearInterval(liveRefreshTimer);
-      const interval = hasLiveMatch() ? 10000 : 20000;
+      const interval = hasLiveMatch() ? 5000 : 20000;
       liveRefreshTimer = window.setInterval(loadLiveData, interval);
     }
 
@@ -4098,61 +4196,253 @@
       };
     }
 
-    function formationRows(formation) {
-      const rows = String(formation || "4-4-2")
+    function lineupRoleFromPosition(abbr) {
+      const key = String(abbr || "").toUpperCase().trim();
+      if (!key) {
+        return "";
+      }
+
+      if (key === "G" || key === "GK") {
+        return "gk";
+      }
+
+      if (key === "RB" || key === "RWB") {
+        return "rb";
+      }
+
+      if (key === "LB" || key === "LWB") {
+        return "lb";
+      }
+
+      if (key === "CD-R" || key === "RCB" || key === "CB-R") {
+        return "rcb";
+      }
+
+      if (key === "CD-L" || key === "LCB" || key === "CB-L") {
+        return "lcb";
+      }
+
+      if (key === "CD" || key === "CB") {
+        return "cb";
+      }
+
+      if (key.startsWith("DM") || key === "CDM") {
+        return "dm";
+      }
+
+      if (key === "RM" || key === "RW") {
+        return "rm";
+      }
+
+      if (key === "LM" || key === "LW") {
+        return "lm";
+      }
+
+      if (key === "CM-R" || key === "RCM") {
+        return "rcm";
+      }
+
+      if (key === "CM-L" || key === "LCM") {
+        return "lcm";
+      }
+
+      if (key === "AM-L" || key === "LAM") {
+        return "aml";
+      }
+
+      if (key === "AM-R" || key === "RAM") {
+        return "amr";
+      }
+
+      if (key === "AM" || key === "CAM") {
+        return "am";
+      }
+
+      if (key.startsWith("CM") || key === "DM") {
+        return "cm";
+      }
+
+      if (key === "CF-R" || key === "ST-R" || key === "RS") {
+        return "str";
+      }
+
+      if (key === "CF-L" || key === "ST-L" || key === "LS") {
+        return "stl";
+      }
+
+      if (key === "F" || key.startsWith("ST") || key.startsWith("CF")) {
+        return "st";
+      }
+
+      return "";
+    }
+
+    function parseFormationLines(formation) {
+      const parts = String(formation || "4-4-2")
         .split("-")
-        .map((part) => Number.parseInt(part, 10))
-        .filter((count) => Number.isFinite(count) && count > 0);
+        .map((value) => Number(value.trim()))
+        .filter((value) => Number.isFinite(value) && value > 0);
 
-      return rows.length ? rows : [4, 4, 2];
+      return parts.length ? parts : [4, 4, 2];
     }
 
-    function getFormationRowY(rowIdx, rowCount, isHome) {
+    function lineupRoleDepth(player, formation) {
+      const abbr = String(player.positionAbbr || "").toUpperCase().trim();
+      const lines = parseFormationLines(formation);
+      const pivotSize = lines.length >= 2 ? lines[1] : 4;
+      const isDoublePivot = pivotSize === 2 && lines.length >= 4;
+
+      if (abbr === "G" || abbr === "GK") {
+        return 0;
+      }
+
+      if (
+        abbr === "RB" || abbr === "LB" || abbr === "RWB" || abbr === "LWB"
+        || abbr === "CB" || abbr === "RCB" || abbr === "LCB"
+        || abbr.startsWith("CD")
+      ) {
+        return 10;
+      }
+
+      if (abbr === "DM" || abbr === "CDM" || ((abbr === "LM" || abbr === "RM") && isDoublePivot)) {
+        return 20;
+      }
+
+      if (abbr.startsWith("CM")) {
+        return 25;
+      }
+
+      if (abbr === "AM" || abbr === "CAM") {
+        return 28;
+      }
+
+      if (abbr === "LW" || abbr === "RW" || abbr.startsWith("AM")) {
+        return 30;
+      }
+
+      if (abbr === "LM" || abbr === "RM") {
+        return 28;
+      }
+
+      if (abbr === "F" || abbr.startsWith("ST") || abbr.startsWith("CF")) {
+        return 40;
+      }
+
+      return 15 + (Number(player.formationPlace) || 99) * 0.01;
+    }
+
+    function spreadLineupX(count, index) {
+      if (count <= 1) {
+        return 50;
+      }
+
+      const min = 14;
+      const max = 86;
+      return min + (index / (count - 1)) * (max - min);
+    }
+
+    function lineupRowYValues(rowCount, isHome) {
       const homeRows = {
-        1: [30],
-        2: [18, 34],
-        3: [14, 26, 38],
-        4: [12, 21, 30, 39],
-        5: [11, 18, 25, 32, 39]
+        1: [5],
+        2: [5, 37],
+        3: [5, 21, 37],
+        4: [5, 14, 26, 37],
+        5: [5, 11, 20, 31, 37],
+        6: [5, 10, 17, 24, 31, 37]
       };
-      const rows = homeRows[rowCount] || homeRows[4];
-      const yHome = rows[Math.min(rowIdx, rows.length - 1)] || 30;
-      return isHome ? yHome : 100 - yHome;
+      const ys = homeRows[rowCount] || homeRows[5];
+
+      return ys.map((y) => (isHome ? y : 100 - y));
     }
 
-    function getFormationCoords(formationPlace, formation, isHome) {
-      if (!formationPlace) {
-        return { x: 50, y: isHome ? 28 : 72, rowIdx: 0 };
+    function resolveLineupRowPlayers(outfield, rowCount, rowIndex) {
+      if (!outfield.length || rowCount <= 0) {
+        return [];
       }
 
-      if (formationPlace === 1) {
-        return { x: 50, y: isHome ? 5 : 95, rowIdx: -1 };
+      if (outfield.length <= rowCount) {
+        return rowIndex === 0 ? outfield.slice() : [];
       }
 
-      const rows = formationRows(formation);
-      let slot = formationPlace - 2;
-      let rowIdx = 0;
-      let colIdx = 0;
+      const chunkSize = Math.ceil(outfield.length / rowCount);
+      const start = rowIndex * chunkSize;
+      return outfield.slice(start, start + chunkSize);
+    }
 
-      for (let index = 0; index < rows.length; index += 1) {
-        if (slot < rows[index]) {
-          rowIdx = index;
-          colIdx = slot;
-          break;
+    function layoutLineupCoords(starters, formation, isHome) {
+      const lines = parseFormationLines(formation);
+      const rowCounts = [1, ...lines];
+      const yByRow = lineupRowYValues(rowCounts.length, isHome);
+      const coords = new Map();
+      const gkPlayers = starters.filter((player) => lineupRoleDepth(player, formation) === 0);
+      const outfield = starters
+        .filter((player) => lineupRoleDepth(player, formation) > 0)
+        .sort((left, right) => {
+          const depthDiff = lineupRoleDepth(left, formation) - lineupRoleDepth(right, formation);
+          if (depthDiff !== 0) {
+            return depthDiff;
+          }
+
+          return (left.formationPlace || 99) - (right.formationPlace || 99);
+        });
+      const expectedOutfield = lines.reduce((sum, count) => sum + count, 0);
+
+      gkPlayers.forEach((player) => {
+        coords.set(player.id, { x: 50, y: yByRow[0] });
+      });
+
+      if (outfield.length === expectedOutfield) {
+        let cursor = 0;
+
+        for (let rowIndex = 1; rowIndex < rowCounts.length; rowIndex += 1) {
+          const rowPlayers = outfield
+            .slice(cursor, cursor + rowCounts[rowIndex])
+            .sort((left, right) => (left.formationPlace || 99) - (right.formationPlace || 99));
+
+          cursor += rowCounts[rowIndex];
+          rowPlayers.forEach((player, index) => {
+            coords.set(player.id, {
+              x: spreadLineupX(rowPlayers.length, index),
+              y: yByRow[rowIndex]
+            });
+          });
+        }
+      } else {
+        for (let rowIndex = 1; rowIndex < rowCounts.length; rowIndex += 1) {
+          const rowPlayers = resolveLineupRowPlayers(outfield, lines.length, rowIndex - 1)
+            .sort((left, right) => (left.formationPlace || 99) - (right.formationPlace || 99));
+
+          rowPlayers.forEach((player, index) => {
+            coords.set(player.id, {
+              x: spreadLineupX(rowPlayers.length, index),
+              y: yByRow[rowIndex]
+            });
+          });
         }
 
-        slot -= rows[index];
+        outfield.forEach((player) => {
+          if (!coords.has(player.id)) {
+            coords.set(player.id, { x: 50, y: yByRow[yByRow.length - 1] });
+          }
+        });
       }
 
-      const countInRow = rows[rowIdx] || 1;
-      const pitchXMin = countInRow >= 5 ? 17 : countInRow >= 4 ? 16 : 20;
-      const pitchXMax = countInRow >= 5 ? 83 : countInRow >= 4 ? 84 : 80;
-      const x = countInRow === 1
-        ? 50
-        : pitchXMin + (colIdx / (countInRow - 1)) * (pitchXMax - pitchXMin);
-      const y = getFormationRowY(rowIdx, rows.length, isHome);
+      starters.forEach((player) => {
+        if (!coords.has(player.id)) {
+          coords.set(player.id, { x: 50, y: yByRow[yByRow.length - 1] });
+        }
+      });
 
-      return { x, y, rowIdx };
+      return coords;
+    }
+
+    function getLineupCoords(player, isHome, coordsMap) {
+      if (coordsMap?.has(player.id)) {
+        return coordsMap.get(player.id);
+      }
+
+      const homeCoords = { x: 50, y: 28 };
+      return isHome ? homeCoords : { x: homeCoords.x, y: 100 - homeCoords.y };
     }
 
     function parseRosterPlayer(player) {
@@ -4630,8 +4920,8 @@
       return `${parts[0][0]}. ${parts[parts.length - 1]}`;
     }
 
-    function renderPitchPlayer(player, isHome, formation, eventsMap) {
-      const coords = getFormationCoords(player.formationPlace, formation, isHome);
+    function renderPitchPlayer(player, isHome, coordsMap, eventsMap) {
+      const coords = getLineupCoords(player, isHome, coordsMap);
       const sideClass = isHome ? "is-home" : "is-away";
       const events = eventsMap.get(player.id) || { goals: 0, assists: 0, yellow: 0, red: 0, subInMin: null, subOutMin: null };
       const icons = [];
@@ -4720,8 +5010,10 @@
       }
 
       const eventsMap = buildPlayerEventsMap(events);
-      const homePitch = homeStarters.map((player) => renderPitchPlayer(player, true, lineups.home?.formation, eventsMap)).join("");
-      const awayPitch = awayStarters.map((player) => renderPitchPlayer(player, false, lineups.away?.formation, eventsMap)).join("");
+      const homeCoords = layoutLineupCoords(homeStarters, lineups.home?.formation, true);
+      const awayCoords = layoutLineupCoords(awayStarters, lineups.away?.formation, false);
+      const homePitch = homeStarters.map((player) => renderPitchPlayer(player, true, homeCoords, eventsMap)).join("");
+      const awayPitch = awayStarters.map((player) => renderPitchPlayer(player, false, awayCoords, eventsMap)).join("");
       const homeBench = (lineups.home?.subs || []).map((player) => renderBenchPlayer(player, eventsMap)).join("")
         || '<div class="lineup-bench-row"><div class="lineup-bench-main"><div class="lineup-bench-name">Chưa có dữ liệu.</div></div></div>';
       const awayBench = (lineups.away?.subs || []).map((player) => renderBenchPlayer(player, eventsMap)).join("")
@@ -4972,7 +5264,19 @@
       return value > 0 ? `+${value}` : String(value);
     }
 
-    const espnScoreboardUrl = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260628&limit=200";
+    function buildEspnScoreboardUrl() {
+      const now = new Date();
+      const tournamentStartMs = schedule.reduce(
+        (earliest, match) => Math.min(earliest, Date.parse(match.utc)),
+        Date.parse(schedule[0].utc)
+      );
+      const start = new Date(tournamentStartMs);
+      start.setUTCHours(0, 0, 0, 0);
+      const end = new Date(now);
+      end.setDate(end.getDate() + 7);
+      const fmt = (date) => date.toISOString().slice(0, 10).replace(/-/g, "");
+      return `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=${fmt(start)}-${fmt(end)}&limit=200`;
+    }
 
     const espnAbbreviationAliases = {
       BIH: "Bosnia and Herzegovina",
@@ -4992,7 +5296,7 @@
 
       return {
         source: "ESPN",
-        sourceUrl: espnScoreboardUrl,
+        sourceUrl: buildEspnScoreboardUrl(),
         updatedAt: new Date().toISOString(),
         events: events.map((event) => {
           const competition = event.competitions && event.competitions[0];
@@ -5059,9 +5363,9 @@
       document.body.appendChild(script);
     }
 
-    async function loadLiveData() {
+    async function loadLiveData(retry = true) {
       try {
-        const response = await fetch(espnScoreboardUrl, { cache: "no-store" });
+        const response = await fetch(buildEspnScoreboardUrl(), { cache: "no-store" });
 
         if (!response.ok) {
           throw new Error(`ESPN returned ${response.status}`);
@@ -5077,6 +5381,11 @@
         refreshLiveViews();
         scheduleLiveRefresh();
       } catch (error) {
+        if (retry) {
+          window.setTimeout(() => loadLiveData(false), 2000);
+          return;
+        }
+
         loadBundledLiveData();
         scheduleLiveRefresh();
       }
@@ -5280,16 +5589,7 @@
       }
 
       if (next && isLiveMatch(next)) {
-        localClockEl.textContent = `Giờ VN · ${new Intl.DateTimeFormat("vi-VN", {
-          timeZone: TIMEZONE_VN,
-          weekday: "short",
-          day: "2-digit",
-          month: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-          hour12: false
-        }).format(new Date())}`;
+        renderLocalClock();
         return;
       }
 
@@ -5304,19 +5604,11 @@
       minutesEl.textContent = pad(minutes, 2);
       secondsEl.textContent = pad(seconds, 2);
 
-      localClockEl.textContent = `Giờ VN · ${new Intl.DateTimeFormat("vi-VN", {
-        timeZone: TIMEZONE_VN,
-        weekday: "short",
-        day: "2-digit",
-        month: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false
-      }).format(new Date())}`;
+      renderLocalClock();
     }
 
     renderStandings();
+    renderLocalClock();
     loadLiveData();
 
     document.addEventListener("visibilitychange", () => {
