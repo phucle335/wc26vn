@@ -2903,6 +2903,7 @@
     let selectedGroupName = "";
     let selectedMatchKey = "";
     let centerMatchKey = "";
+    let centerMatchPinned = false;
     let playerStatsTab = "goals";
     let playerLeadersCache = null;
     let playerLeadersFetchedAt = 0;
@@ -3412,11 +3413,18 @@
     }
 
     function scoreText(match) {
-      if (match.homeScore === null || match.awayScore === null) {
+      const homeScore = isLiveMatch(match)
+        ? (match.rawHomeScore ?? match.homeScore)
+        : match.homeScore;
+      const awayScore = isLiveMatch(match)
+        ? (match.rawAwayScore ?? match.awayScore)
+        : match.awayScore;
+
+      if (homeScore === null || awayScore === null) {
         return "vs";
       }
 
-      return `${match.homeScore}-${match.awayScore}`;
+      return `${homeScore}-${awayScore}`;
     }
 
     function statusText(match) {
@@ -3537,8 +3545,15 @@
     }
 
     function getLiveDisplayScores(match) {
-      if (match.homeScore !== null && match.awayScore !== null) {
-        return { home: match.homeScore, away: match.awayScore };
+      const home = isLiveMatch(match)
+        ? (match.rawHomeScore ?? match.homeScore)
+        : match.homeScore;
+      const away = isLiveMatch(match)
+        ? (match.rawAwayScore ?? match.awayScore)
+        : match.awayScore;
+
+      if (home !== null && away !== null) {
+        return { home, away };
       }
 
       return { home: 0, away: 0 };
@@ -3553,6 +3568,7 @@
     function updateLiveBoard(match) {
       if (!isLiveMatch(match)) {
         setStageMode(false);
+        liveTimelineFetchKey = "";
         if (liveTimelineListEl) {
           liveTimelineListEl.innerHTML = "";
         }
@@ -5418,21 +5434,41 @@
       `;
     }
 
+    let liveTimelineFetchKey = "";
+    let liveTimelineFetchAt = 0;
+    const LIVE_TIMELINE_FETCH_MS = 12000;
+
     async function loadMatchTimelineForLive(match) {
-      if (!isLiveMatch(match) || !liveTimelineListEl) {
+      if (!isLiveMatch(match) || !liveTimelineListEl || !match.espnId) {
         return;
       }
 
-      const summary = await fetchDisplayMatchSummary(match);
-      if (liveTimelineListEl) {
-        liveTimelineListEl.innerHTML = renderMatchEventFeed(summary?.events || [], match, { showHead: false });
+      const requestKey = matchKey(match.home, match.away, match.utc);
+      const minuteBucket = Math.floor((getLiveClockSeconds(match) || 0) / 60);
+      const fetchKey = `${requestKey}|${match.rawHomeScore}|${match.rawAwayScore}|${minuteBucket}`;
+      const now = Date.now();
+      const shouldFetch = fetchKey !== liveTimelineFetchKey
+        || now - liveTimelineFetchAt >= LIVE_TIMELINE_FETCH_MS;
+
+      if (!shouldFetch) {
+        return;
       }
 
-      const scores = getLiveDisplayScores(match);
-      if (liveHomeScoreEl && liveAwayScoreEl) {
-        liveHomeScoreEl.textContent = scores.home;
-        liveAwayScoreEl.textContent = scores.away;
+      liveTimelineFetchKey = fetchKey;
+      liveTimelineFetchAt = now;
+
+      const summary = await fetchMatchSummary(match.espnId);
+      const current = getMatchByKey(requestKey);
+
+      if (!current || !isLiveMatch(current) || !liveTimelineListEl) {
+        return;
       }
+
+      liveTimelineListEl.innerHTML = renderMatchEventFeed(
+        summary?.events || [],
+        current,
+        { showHead: false }
+      );
     }
 
     function renderStatsPanel(stats, match, events, statsData) {
@@ -6144,6 +6180,17 @@
     }
 
     function getCenterMatch(matches) {
+      if (centerMatchPinned && centerMatchKey) {
+        const pinned = getMatchByKey(centerMatchKey)
+          || matches.find((match) => matchKey(match.home, match.away, match.utc) === centerMatchKey);
+        if (pinned) {
+          return pinned;
+        }
+
+        centerMatchPinned = false;
+        centerMatchKey = "";
+      }
+
       const liveMatch = findLiveMatch();
       if (liveMatch) {
         centerMatchKey = matchKey(liveMatch.home, liveMatch.away, liveMatch.utc);
@@ -6333,14 +6380,26 @@
       }
     });
 
+    function selectFixtureMatch(key) {
+      const match = getMatchByKey(key);
+      const reopen = centerMatchPinned && centerMatchKey === key;
+
+      centerMatchKey = key;
+      centerMatchPinned = true;
+      updateCountdown();
+
+      if (reopen || (match && isLiveMatch(match))) {
+        openMatchDetail(key);
+      }
+    }
+
     fixturesEl.addEventListener("click", (event) => {
       const card = event.target.closest(".match-card[data-match-key]");
       if (!card) {
         return;
       }
 
-      centerMatchKey = card.dataset.matchKey;
-      updateCountdown();
+      selectFixtureMatch(card.dataset.matchKey);
     });
 
     fixturesEl.addEventListener("keydown", (event) => {
@@ -6354,8 +6413,7 @@
       }
 
       event.preventDefault();
-      centerMatchKey = card.dataset.matchKey;
-      updateCountdown();
+      selectFixtureMatch(card.dataset.matchKey);
     });
 
     const canvas = document.getElementById("motion");
