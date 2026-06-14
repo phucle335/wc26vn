@@ -2155,20 +2155,52 @@
         height: auto;
       }
 
+      .standings-panel .standings-scroll {
+        margin-top: 0.9rem;
+      }
+
       .standings-scroll {
-        flex: 1;
-        min-height: 0;
+        flex: none;
+        min-height: auto;
         height: auto;
         max-height: none;
+        overflow: visible;
+        overscroll-behavior: auto;
+        touch-action: auto;
+        padding-right: 0;
+      }
+
+      #standingsView {
+        height: auto;
+        min-height: auto;
+      }
+
+      .standings-groups {
+        flex: none;
+        min-height: auto;
+        height: auto;
+        overflow: visible;
+      }
+
+      #standingsView .player-stats-entry {
+        margin-top: 0.75rem;
       }
 
       .standings-scroll:has(.standings-overlay:not(.hidden)) {
-        max-height: 34rem;
+        max-height: min(34rem, 70vh);
+        overflow-x: hidden;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        touch-action: pan-y;
+      }
+
+      .dashboard {
+        padding-bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
       }
 
       .fixtures-list {
-        height: 34rem;
-        max-height: 34rem;
+        height: auto;
+        max-height: none;
       }
 
       .local-clock-wrap {
