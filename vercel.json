@@ -1,3 +1,4 @@
 {
-  "buildCommand": "node scripts/write-deploy-info.js"
+  "buildCommand": "node scripts/write-deploy-info.js",
+  "outputDirectory": "."
 }
