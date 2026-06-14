@@ -1596,9 +1596,9 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 0.1rem;
+      gap: 0.08rem;
       width: max-content;
-      max-width: 5.2rem;
+      max-width: 4.2rem;
       transform: translate(-50%, -50%);
       text-align: center;
     }
@@ -1663,9 +1663,9 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 0.08rem;
+      gap: 0.06rem;
       width: 100%;
-      max-width: 5.2rem;
+      max-width: 4.2rem;
       padding: 0;
       background: transparent;
       border: 0;
@@ -1684,11 +1684,12 @@
 
     .lineup-player-name {
       display: block;
-      max-width: 5.2rem;
+      max-width: 4.2rem;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       color: #ffffff;
+      font-size: 0.48rem;
     }
 
     .lineup-player-icons {
@@ -4336,23 +4337,118 @@
         return 50;
       }
 
-      const min = 14;
-      const max = 86;
+      const min = 12;
+      const max = 88;
       return min + (index / (count - 1)) * (max - min);
     }
 
-    function lineupRowYValues(rowCount, isHome) {
-      const homeRows = {
-        1: [5],
-        2: [5, 37],
-        3: [5, 21, 37],
-        4: [5, 14, 26, 37],
-        5: [5, 11, 20, 31, 37],
-        6: [5, 10, 17, 24, 31, 37]
-      };
-      const ys = homeRows[rowCount] || homeRows[5];
+    const LINEUP_HALF_ZONE = {
+      home: { gk: 8, attack: 42 },
+      away: { gk: 92, attack: 58 }
+    };
 
-      return ys.map((y) => (isHome ? y : 100 - y));
+    function lineupPitchSideOrder(player) {
+      const role = lineupRoleFromPosition(player.positionAbbr);
+      const sideRank = {
+        lb: 0,
+        lwb: 0,
+        lm: 0,
+        aml: 0,
+        lw: 0,
+        stl: 0,
+        lcb: 1,
+        lcm: 1,
+        dm: 1,
+        cb: 2,
+        cm: 2,
+        am: 2,
+        st: 2,
+        rcb: 3,
+        rcm: 3,
+        amr: 3,
+        rm: 3,
+        rw: 3,
+        str: 3,
+        rb: 4,
+        rwb: 4
+      };
+
+      if (role && sideRank[role] !== undefined) {
+        return sideRank[role];
+      }
+
+      return Number(player.formationPlace) || 99;
+    }
+
+    function sortLineupRowPlayers(players) {
+      return players.slice().sort((left, right) => {
+        const orderDiff = lineupPitchSideOrder(left) - lineupPitchSideOrder(right);
+        if (orderDiff !== 0) {
+          return orderDiff;
+        }
+
+        return (left.formationPlace || 99) - (right.formationPlace || 99);
+      });
+    }
+
+    function lineupRowYValues(rowCount, isHome) {
+      const zone = isHome ? LINEUP_HALF_ZONE.home : LINEUP_HALF_ZONE.away;
+
+      if (rowCount <= 1) {
+        return [zone.gk];
+      }
+
+      const ys = [];
+      for (let index = 0; index < rowCount; index += 1) {
+        const ratio = index / (rowCount - 1);
+        ys.push(zone.gk + ratio * (zone.attack - zone.gk));
+      }
+
+      return ys;
+    }
+
+    function nudgeLineupCollisions(coords, starters) {
+      const entries = starters
+        .map((player) => {
+          const point = coords.get(player.id);
+          if (!point) {
+            return null;
+          }
+
+          return { id: player.id, x: point.x, y: point.y };
+        })
+        .filter(Boolean);
+
+      for (let pass = 0; pass < 4; pass += 1) {
+        for (let leftIndex = 0; leftIndex < entries.length; leftIndex += 1) {
+          for (let rightIndex = leftIndex + 1; rightIndex < entries.length; rightIndex += 1) {
+            const left = entries[leftIndex];
+            const right = entries[rightIndex];
+
+            if (Math.abs(left.y - right.y) > 5) {
+              continue;
+            }
+
+            const gap = Math.abs(right.x - left.x);
+            if (gap >= 18) {
+              continue;
+            }
+
+            const push = (18 - gap) / 2 + 0.6;
+            if (right.x >= left.x) {
+              left.x = Math.max(10, left.x - push);
+              right.x = Math.min(90, right.x + push);
+            } else {
+              left.x = Math.min(90, left.x + push);
+              right.x = Math.max(10, right.x - push);
+            }
+          }
+        }
+      }
+
+      entries.forEach((entry) => {
+        coords.set(entry.id, { x: entry.x, y: entry.y });
+      });
     }
 
     function resolveLineupRowPlayers(outfield, rowCount, rowIndex) {
@@ -4395,9 +4491,9 @@
         let cursor = 0;
 
         for (let rowIndex = 1; rowIndex < rowCounts.length; rowIndex += 1) {
-          const rowPlayers = outfield
-            .slice(cursor, cursor + rowCounts[rowIndex])
-            .sort((left, right) => (left.formationPlace || 99) - (right.formationPlace || 99));
+          const rowPlayers = sortLineupRowPlayers(
+            outfield.slice(cursor, cursor + rowCounts[rowIndex])
+          );
 
           cursor += rowCounts[rowIndex];
           rowPlayers.forEach((player, index) => {
@@ -4409,8 +4505,9 @@
         }
       } else {
         for (let rowIndex = 1; rowIndex < rowCounts.length; rowIndex += 1) {
-          const rowPlayers = resolveLineupRowPlayers(outfield, lines.length, rowIndex - 1)
-            .sort((left, right) => (left.formationPlace || 99) - (right.formationPlace || 99));
+          const rowPlayers = sortLineupRowPlayers(
+            resolveLineupRowPlayers(outfield, lines.length, rowIndex - 1)
+          );
 
           rowPlayers.forEach((player, index) => {
             coords.set(player.id, {
@@ -4433,7 +4530,17 @@
         }
       });
 
+      nudgeLineupCollisions(coords, starters);
+
       return coords;
+    }
+
+    function pitchPlayerBlockOrder(isHome, y) {
+      if (isHome) {
+        return y >= 36 ? "label-first" : "photo-first";
+      }
+
+      return y <= 64 ? "photo-first" : "label-first";
     }
 
     function getLineupCoords(player, isHome, coordsMap) {
@@ -4955,10 +5062,14 @@
             <span class="lineup-player-name" title="${player.name}">${formatPitchPlayerName(player)}</span>
             ${icons.length ? `<div class="lineup-player-icons">${icons.join("")}</div>` : ""}
           </div>`;
+      const blockOrder = pitchPlayerBlockOrder(isHome, coords.y);
+      const inner = blockOrder === "label-first"
+        ? labelBlock + photoBlock
+        : photoBlock + labelBlock;
 
       return `
-        <div class="lineup-player-dot ${sideClass}" style="left:${coords.x}%;top:${coords.y}%;">
-          ${isHome ? photoBlock + labelBlock : labelBlock + photoBlock}
+        <div class="lineup-player-dot ${sideClass}" style="left:${coords.x}%;top:${coords.y}%;z-index:${Math.round(coords.y)};">
+          ${inner}
         </div>
       `;
     }
