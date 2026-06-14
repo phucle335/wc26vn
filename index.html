@@ -2904,6 +2904,7 @@
     let selectedMatchKey = "";
     let centerMatchKey = "";
     let centerMatchPinned = false;
+    let trackingLiveCenterKey = "";
     let playerStatsTab = "goals";
     let playerLeadersCache = null;
     let playerLeadersFetchedAt = 0;
@@ -3066,8 +3067,8 @@
         scoreDelayState.set(key, state);
       }
 
-      // Trận đã kết thúc trước phiên hiện tại → hiện ngay (lịch sử / bảng điểm)
-      if (rawCompleted && !rawInProgress && !state.wasLive) {
+      // Trận đã kết thúc → hiện ngay (kể cả vừa xem live)
+      if (rawCompleted && !rawInProgress) {
         state.shownHome = rawHome;
         state.shownAway = rawAway;
         state.targetHome = rawHome;
@@ -3509,11 +3510,42 @@
     }
 
     function isLiveMatch(match) {
-      return !!(
-        match?.inProgress
-        || match?.rawInProgress
-        || match?.statusState === "in"
-      );
+      if (!match) {
+        return false;
+      }
+
+      if (match.statusState === "post") {
+        return false;
+      }
+
+      const completed = !!(match.rawCompleted ?? match.completed);
+      const active = !!(match.inProgress || match.rawInProgress || match.statusState === "in");
+
+      if (completed && !active) {
+        return false;
+      }
+
+      return active;
+    }
+
+    function isFinishedMatch(match) {
+      return !!match && !isLiveMatch(match) && !!(match.rawCompleted ?? match.completed);
+    }
+
+    function handleLiveMatchTransition() {
+      const live = findLiveMatch();
+      const liveKey = live ? matchKey(live.home, live.away, live.utc) : "";
+
+      if (trackingLiveCenterKey && !liveKey) {
+        if (!centerMatchPinned || centerMatchKey === trackingLiveCenterKey) {
+          centerMatchPinned = false;
+          centerMatchKey = "";
+        }
+
+        liveTimelineFetchKey = "";
+      }
+
+      trackingLiveCenterKey = liveKey;
     }
 
     function findLiveMatch() {
@@ -6180,10 +6212,18 @@
     }
 
     function getCenterMatch(matches) {
+      if (centerMatchKey) {
+        const current = getMatchByKey(centerMatchKey);
+        if (!current || isFinishedMatch(current)) {
+          centerMatchPinned = false;
+          centerMatchKey = "";
+        }
+      }
+
       if (centerMatchPinned && centerMatchKey) {
         const pinned = getMatchByKey(centerMatchKey)
           || matches.find((match) => matchKey(match.home, match.away, match.utc) === centerMatchKey);
-        if (pinned) {
+        if (pinned && !isFinishedMatch(pinned)) {
           return pinned;
         }
 
@@ -6278,6 +6318,7 @@
 
     function updateCountdown() {
       const now = Date.now();
+      handleLiveMatchTransition();
       const matches = nextMatches(now);
       const next = getCenterMatch(matches);
       const activeKey = next ? matchKey(next.home, next.away, next.utc) : "";
