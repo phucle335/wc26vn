@@ -2386,6 +2386,8 @@
   </main>
 
   <script src="deploy-info.js"></script>
+  <script src="scripts/wc26-logic.js"></script>
+  <script src="scripts/wc26-self-heal.js"></script>
   <script>
     const teamInfo = {
       "Algeria": { code: "dz", short: "ALG" },
@@ -2880,16 +2882,19 @@
       return `${pick("day")}/${pick("month")} ${pick("hour")}:${pick("minute")}`;
     }
 
-    const liveNameAliases = {
-      "Bosnia-Herzegovina": "Bosnia and Herzegovina",
-      "Cape Verde": "Cabo Verde",
-      "Congo DR": "DR Congo",
-      "Curaçao": "Curacao",
-      "South Korea": "Korea Republic",
-      "Türkiye": "Turkey",
-      USA: "United States",
-      "Bosnia & Herzegovina": "Bosnia and Herzegovina"
-    };
+    const {
+      liveNameAliases,
+      canonicalName,
+      matchKey,
+      isLiveMatch,
+      isFinishedMatch,
+      isUpcomingOrLiveMatch,
+      preferLiveEvent,
+      getStandingsScores,
+      getLiveDisplayScores,
+      resolveCenterMatch,
+      transitionLiveCenterState
+    } = window.WC26Logic;
 
     let liveData = null;
     let liveFetchInFlight = false;
@@ -2897,7 +2902,8 @@
     let lastUiTickAt = 0;
     let lastFrameAt = 0;
     let liveLoopStarted = false;
-    let liveBackupTimer = 0;
+    let backgroundHeartbeatTimer = 0;
+    const UI_TICK_MS = 1000;
     let lastLiveScoresKey = "";
     let standingsOverlay = "standings";
     let selectedGroupName = "";
@@ -2916,15 +2922,6 @@
     const summaryCache = new Map();
     const scoreDelayState = new Map();
     const SPOILER_DELAY_MS = 150000;
-
-    function canonicalName(name) {
-      return liveNameAliases[name] || name;
-    }
-
-    function matchKey(home, away, utc) {
-      const teams = [canonicalName(home), canonicalName(away)].sort().join("|");
-      return `${Date.parse(utc)}|${teams}`;
-    }
 
     function numberScore(value) {
       if (value && typeof value === "object") {
@@ -3284,26 +3281,6 @@
       return [canonicalName(home), canonicalName(away)].sort().join("|");
     }
 
-    function preferLiveEvent(candidate, existing) {
-      if (!existing) {
-        return true;
-      }
-
-      const candidateLive = candidate.statusState === "in";
-      const existingLive = existing.statusState === "in";
-      if (candidateLive !== existingLive) {
-        return candidateLive;
-      }
-
-      const candidateDone = candidate.statusState === "post" || candidate.completed;
-      const existingDone = existing.statusState === "post" || existing.completed;
-      if (candidateDone !== existingDone) {
-        return candidateDone;
-      }
-
-      return Date.parse(candidate.utc) >= Date.parse(existing.utc);
-    }
-
     function buildLiveLookups(liveEvents) {
       const byExact = new Map();
       const byDay = new Map();
@@ -3509,43 +3486,20 @@
       return extra > 0 ? `90+${extra}'` : "90'";
     }
 
-    function isLiveMatch(match) {
-      if (!match) {
-        return false;
-      }
-
-      if (match.statusState === "post") {
-        return false;
-      }
-
-      const completed = !!(match.rawCompleted ?? match.completed);
-      const active = !!(match.inProgress || match.rawInProgress || match.statusState === "in");
-
-      if (completed && !active) {
-        return false;
-      }
-
-      return active;
-    }
-
-    function isFinishedMatch(match) {
-      return !!match && !isLiveMatch(match) && !!(match.rawCompleted ?? match.completed);
-    }
-
     function handleLiveMatchTransition() {
       const live = findLiveMatch();
-      const liveKey = live ? matchKey(live.home, live.away, live.utc) : "";
+      const next = transitionLiveCenterState(
+        { centerMatchKey, centerMatchPinned, trackingLiveCenterKey },
+        live
+      );
 
-      if (trackingLiveCenterKey && !liveKey) {
-        if (!centerMatchPinned || centerMatchKey === trackingLiveCenterKey) {
-          centerMatchPinned = false;
-          centerMatchKey = "";
-        }
-
+      if (trackingLiveCenterKey && !next.trackingLiveCenterKey) {
         liveTimelineFetchKey = "";
       }
 
-      trackingLiveCenterKey = liveKey;
+      centerMatchKey = next.centerMatchKey;
+      centerMatchPinned = next.centerMatchPinned;
+      trackingLiveCenterKey = next.trackingLiveCenterKey;
     }
 
     function findLiveMatch() {
@@ -3574,21 +3528,6 @@
       if (liveTimelineEl) {
         liveTimelineEl.classList.toggle("hidden", !isLive);
       }
-    }
-
-    function getLiveDisplayScores(match) {
-      const home = isLiveMatch(match)
-        ? (match.rawHomeScore ?? match.homeScore)
-        : match.homeScore;
-      const away = isLiveMatch(match)
-        ? (match.rawAwayScore ?? match.awayScore)
-        : match.awayScore;
-
-      if (home !== null && away !== null) {
-        return { home, away };
-      }
-
-      return { home: 0, away: 0 };
     }
 
     function shouldShowInGroupHistory(match) {
@@ -3698,46 +3637,37 @@
       return hasLiveMatch() ? 5000 : 20000;
     }
 
+    function runBackgroundTick() {
+      const now = Date.now();
+      lastFrameAt = now;
+
+      if (!lastUiTickAt || now - lastUiTickAt >= UI_TICK_MS) {
+        lastUiTickAt = now;
+        updateCountdown();
+      }
+
+      const fetchEvery = getLiveRefreshIntervalMs();
+      if (!liveFetchInFlight && now - lastLiveFetchAt >= fetchEvery) {
+        loadLiveData();
+      }
+    }
+
+    function startBackgroundHeartbeat() {
+      if (backgroundHeartbeatTimer) {
+        return;
+      }
+
+      backgroundHeartbeatTimer = window.setInterval(runBackgroundTick, UI_TICK_MS);
+      runBackgroundTick();
+    }
+
     function startLiveRefreshLoop() {
       if (liveLoopStarted) {
         return;
       }
 
       liveLoopStarted = true;
-
-      function frame(now) {
-        lastFrameAt = now;
-
-        if (!lastUiTickAt || now - lastUiTickAt >= 1000) {
-          lastUiTickAt = now;
-          updateCountdown();
-        }
-
-        const fetchEvery = getLiveRefreshIntervalMs();
-        if (!liveFetchInFlight && now - lastLiveFetchAt >= fetchEvery) {
-          loadLiveData();
-        }
-
-        requestAnimationFrame(frame);
-      }
-
-      requestAnimationFrame(frame);
-    }
-
-    function startLiveBackupTimer() {
-      if (liveBackupTimer) {
-        return;
-      }
-
-      liveBackupTimer = window.setInterval(() => {
-        const fetchEvery = getLiveRefreshIntervalMs();
-        const frameStalled = Date.now() - lastFrameAt > 15000;
-        const fetchDue = Date.now() - lastLiveFetchAt >= fetchEvery - 750;
-
-        if (!liveFetchInFlight && (fetchDue || frameStalled)) {
-          loadLiveData();
-        }
-      }, 5000);
+      startBackgroundHeartbeat();
     }
 
     function initWallpaperRuntime() {
@@ -3754,10 +3684,6 @@
 
       startLiveRefreshLoop();
 
-      if (runtime.isEmbeddedWallpaper) {
-        startLiveBackupTimer();
-      }
-
       const previousWallpaperListener = window.wallpaperPropertyListener;
       window.wallpaperPropertyListener = {
         applyUserProperties(properties) {
@@ -3772,7 +3698,16 @@
       window.addEventListener("focus", forceLiveRefresh);
       window.addEventListener("pageshow", forceLiveRefresh);
       window.addEventListener("online", forceLiveRefresh);
-      document.addEventListener("visibilitychange", forceLiveRefresh);
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          runBackgroundTick();
+          return;
+        }
+
+        forceLiveRefresh();
+        updateCountdown();
+        renderLocalClock();
+      });
     }
 
     function scheduleLiveRefresh() {
@@ -5812,23 +5747,6 @@
       renderDetailTabPanel(summary, match, tab);
     }
 
-    function getStandingsScores(match) {
-      const liveOrDone = match.statusState === "in"
-        || match.statusState === "post"
-        || match.inProgress
-        || match.completed;
-
-      if (!liveOrDone) {
-        return null;
-      }
-
-      if (match.homeScore === null || match.awayScore === null) {
-        return null;
-      }
-
-      return { home: match.homeScore, away: match.awayScore };
-    }
-
     function buildStandings() {
       const table = {};
 
@@ -6177,18 +6095,6 @@
       showStandingsView();
     }
 
-    function isUpcomingOrLiveMatch(match, now) {
-      if (isLiveMatch(match)) {
-        return true;
-      }
-
-      if (match.rawCompleted ?? match.completed) {
-        return false;
-      }
-
-      return Date.parse(match.utc) > now;
-    }
-
     function matchPriority(match) {
       if (isLiveMatch(match)) {
         return 0;
@@ -6212,41 +6118,18 @@
     }
 
     function getCenterMatch(matches) {
-      if (centerMatchKey) {
-        const current = getMatchByKey(centerMatchKey);
-        if (!current || isFinishedMatch(current)) {
-          centerMatchPinned = false;
-          centerMatchKey = "";
-        }
-      }
-
-      if (centerMatchPinned && centerMatchKey) {
-        const pinned = getMatchByKey(centerMatchKey)
-          || matches.find((match) => matchKey(match.home, match.away, match.utc) === centerMatchKey);
-        if (pinned && !isFinishedMatch(pinned)) {
-          return pinned;
-        }
-
-        centerMatchPinned = false;
-        centerMatchKey = "";
-      }
-
       const liveMatch = findLiveMatch();
-      if (liveMatch) {
-        centerMatchKey = matchKey(liveMatch.home, liveMatch.away, liveMatch.utc);
-        return liveMatch;
-      }
+      const result = resolveCenterMatch({
+        matches,
+        centerMatchKey,
+        centerMatchPinned,
+        liveMatch,
+        getMatchByKey
+      });
 
-      if (centerMatchKey) {
-        const selected = matches.find((match) => matchKey(match.home, match.away, match.utc) === centerMatchKey);
-        if (selected) {
-          return selected;
-        }
-
-        centerMatchKey = "";
-      }
-
-      return matches[0] || null;
+      centerMatchKey = result.centerMatchKey;
+      centerMatchPinned = result.centerMatchPinned;
+      return result.match;
     }
 
     function renderFixtures(matches, activeKey) {
@@ -6355,6 +6238,48 @@
     renderStandings();
     startTaskbarInsetWatcher();
     initWallpaperRuntime();
+
+    function clearCenterSelection() {
+      centerMatchPinned = false;
+      centerMatchKey = "";
+    }
+
+    const selfHeal = window.WC26SelfHeal.create({
+      findLiveMatch,
+      getCenterMatch,
+      nextMatches,
+      isFinishedMatch,
+      getLiveDisplayScores,
+      liveBoardEl,
+      countdownTimerEl,
+      dataStatusEl,
+      get centerMatchPinned() {
+        return centerMatchPinned;
+      },
+      clearCenterSelection,
+      handleLiveMatchTransition,
+      updateCountdown,
+      forceLiveRefresh,
+      getLiveDataAgeMs() {
+        if (!liveData?.updatedAt) {
+          return Number.POSITIVE_INFINITY;
+        }
+
+        const updatedAt = Date.parse(liveData.updatedAt);
+        return Number.isFinite(updatedAt) ? Date.now() - updatedAt : Number.POSITIVE_INFINITY;
+      },
+      getFetchStallMs() {
+        return lastLiveFetchAt ? Date.now() - lastLiveFetchAt : Number.POSITIVE_INFINITY;
+      }
+    });
+
+    selfHeal.start(15000);
+    window.WC26_SELF_CHECK = selfHeal;
+
+    if (new URLSearchParams(window.location.search).get("debug") === "1") {
+      console.info("[WC26 self-check]", selfHeal.run(true));
+    }
+
     renderLocalClock();
     loadLiveData();
     groupControlsEl.addEventListener("click", (event) => {
@@ -6574,10 +6499,13 @@
     }
 
     function animate(time) {
-      context.clearRect(0, 0, width, height);
-      drawNet(time);
-      drawOrbit(time);
-      drawParticles(time);
+      if (!document.hidden) {
+        context.clearRect(0, 0, width, height);
+        drawNet(time);
+        drawOrbit(time);
+        drawParticles(time);
+      }
+
       requestAnimationFrame(animate);
     }
 
